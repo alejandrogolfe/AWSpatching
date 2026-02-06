@@ -45,6 +45,3 @@ File Upload -> S3 Bucket -> S3 Event -> AWS Lambda -> Processing
 
 
 
-
-
-
