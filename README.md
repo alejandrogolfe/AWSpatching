@@ -1,4 +1,4 @@
-\# S3 Upload and Lambda Processing Proof of Concept
+# S3 Upload and Lambda Processing Proof of Concept
 
 
 
@@ -10,7 +10,7 @@ This repository contains a \*\*proof of concept\*\* demonstrating how to upload 
 
 
 
-\## Objective
+## Objective
 
 
 
@@ -34,7 +34,7 @@ This workflow simulates a typical \*\*cloud-based, serverless integration\*\* fo
 
 
 
-\## Workflow Overview
+## Workflow Overview
 
 
 
