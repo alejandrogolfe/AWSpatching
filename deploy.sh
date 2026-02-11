@@ -6,7 +6,7 @@ set -e  # Parar si hay error
 # ============================================================
 export AWS_REGION="eu-west-1"
 export PROJECT_NAME="image-processor-alejandrogolfe-2"
-export BUCKET_NAME="${PROJECT_NAME}-bucket-$(date +%s)"
+export BUCKET_NAME="${PROJECT_NAME}-bucket"
 export ECR_REPO="image-processor-alejandrogolfe-2"
 export BATCH_JOB_NAME="${PROJECT_NAME}-job"
 export COMPUTE_ENV_NAME="${PROJECT_NAME}-compute-env"
@@ -29,11 +29,11 @@ echo -e "${GREEN}Account ID: ${AWS_ACCOUNT_ID}${NC}"
 # PASO 1: CREAR BUCKET S3
 # ============================================================
 echo -e "\n${BLUE} PASO 1: Creando bucket S3...${NC}"
-aws s3 mb s3://${BUCKET_NAME} --region ${AWS_REGION}
-echo -e "${GREEN}Bucket creado: ${BUCKET_NAME}${NC}"
+aws s3 mb s3://${BUCKET_NAME} --region ${AWS_REGION} 2>/dev/null || echo "Bucket ya existe"
+echo -e "${GREEN}Bucket: ${BUCKET_NAME}${NC}"
 
-aws s3api put-object --bucket ${BUCKET_NAME} --key input/ --region ${AWS_REGION}
-aws s3api put-object --bucket ${BUCKET_NAME} --key output/ --region ${AWS_REGION}
+aws s3api put-object --bucket ${BUCKET_NAME} --key input/ --region ${AWS_REGION} 2>/dev/null || true
+aws s3api put-object --bucket ${BUCKET_NAME} --key output/ --region ${AWS_REGION} 2>/dev/null || true
 echo -e "${GREEN}Carpetas input/ y output/ creadas${NC}"
 
 # ============================================================
@@ -129,15 +129,23 @@ sleep 10
 # ============================================================
 echo -e "\n${BLUE} PASO 5: Creando Compute Environment...${NC}"
 
-aws batch create-compute-environment \
-  --compute-environment-name ${COMPUTE_ENV_NAME} \
-  --type MANAGED \
-  --state ENABLED \
-  --compute-resources type=FARGATE,maxvCpus=4,subnets=$(aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query 'Subnets[0].SubnetId' --output text --region ${AWS_REGION}),securityGroupIds=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region ${AWS_REGION}) \
-  --service-role arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-batch-service-role \
-  --region ${AWS_REGION}
+EXISTING_CE=$(aws batch describe-compute-environments \
+  --compute-environments ${COMPUTE_ENV_NAME} \
+  --query 'computeEnvironments[0].computeEnvironmentName' \
+  --output text --region ${AWS_REGION} 2>/dev/null || echo "")
 
-echo -e "${GREEN}Compute Environment creado${NC}"
+if [ "$EXISTING_CE" = "${COMPUTE_ENV_NAME}" ]; then
+  echo -e "${GREEN}Compute Environment ya existe, reutilizando${NC}"
+else
+  aws batch create-compute-environment \
+    --compute-environment-name ${COMPUTE_ENV_NAME} \
+    --type MANAGED \
+    --state ENABLED \
+    --compute-resources type=FARGATE,maxvCpus=4,subnets=$(aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query 'Subnets[0].SubnetId' --output text --region ${AWS_REGION}),securityGroupIds=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region ${AWS_REGION}) \
+    --service-role arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-batch-service-role \
+    --region ${AWS_REGION}
+  echo -e "${GREEN}Compute Environment creado${NC}"
+fi
 
 echo "Esperando a que Compute Environment este listo..."
 while true; do
@@ -159,14 +167,22 @@ done
 # ============================================================
 echo -e "\n${BLUE} PASO 6: Creando Job Queue...${NC}"
 
-aws batch create-job-queue \
-  --job-queue-name ${JOB_QUEUE_NAME} \
-  --state ENABLED \
-  --priority 1 \
-  --compute-environment-order order=1,computeEnvironment=${COMPUTE_ENV_NAME} \
-  --region ${AWS_REGION}
+EXISTING_JQ=$(aws batch describe-job-queues \
+  --job-queues ${JOB_QUEUE_NAME} \
+  --query 'jobQueues[0].jobQueueName' \
+  --output text --region ${AWS_REGION} 2>/dev/null || echo "")
 
-echo -e "${GREEN}Job Queue creado${NC}"
+if [ "$EXISTING_JQ" = "${JOB_QUEUE_NAME}" ]; then
+  echo -e "${GREEN}Job Queue ya existe, reutilizando${NC}"
+else
+  aws batch create-job-queue \
+    --job-queue-name ${JOB_QUEUE_NAME} \
+    --state ENABLED \
+    --priority 1 \
+    --compute-environment-order order=1,computeEnvironment=${COMPUTE_ENV_NAME} \
+    --region ${AWS_REGION}
+  echo -e "${GREEN}Job Queue creado${NC}"
+fi
 
 echo "Esperando a que Job Queue este listo..."
 while true; do
@@ -203,6 +219,9 @@ cat > job-definition.json << EOF
     "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-batch-job-role",
     "fargatePlatformConfiguration": {
       "platformVersion": "LATEST"
+    },
+    "networkConfiguration": {
+      "assignPublicIp": "ENABLED"
     }
   }
 }
@@ -264,7 +283,7 @@ def lambda_handler(event, context):
     print(f"Nueva imagen: s3://{bucket}/{key}")
 
     response = batch.submit_job(
-        jobName=f"process-{key.replace('/', '-')}",
+        jobName=f"process-{key.replace('/', '-').replace('.', '-')}",
         jobQueue='${JOB_QUEUE_NAME}',
         jobDefinition='${BATCH_JOB_NAME}',
         containerOverrides={
@@ -282,16 +301,30 @@ EOF
 
 zip lambda.zip lambda_function.py
 
-aws lambda create-function \
+EXISTING_LAMBDA=$(aws lambda get-function \
   --function-name ${LAMBDA_NAME} \
-  --runtime python3.12 \
-  --role arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-lambda-role \
-  --handler lambda_function.lambda_handler \
-  --zip-file fileb://lambda.zip \
-  --timeout 60 \
-  --region ${AWS_REGION}
+  --region ${AWS_REGION} \
+  --query 'Configuration.FunctionName' \
+  --output text 2>/dev/null || echo "")
 
-echo -e "${GREEN}Lambda creada${NC}"
+if [ "$EXISTING_LAMBDA" = "${LAMBDA_NAME}" ]; then
+  echo "Lambda ya existe, actualizando codigo..."
+  aws lambda update-function-code \
+    --function-name ${LAMBDA_NAME} \
+    --zip-file fileb://lambda.zip \
+    --region ${AWS_REGION}
+  echo -e "${GREEN}Lambda actualizada${NC}"
+else
+  aws lambda create-function \
+    --function-name ${LAMBDA_NAME} \
+    --runtime python3.12 \
+    --role arn:aws:iam::${AWS_ACCOUNT_ID}:role/${PROJECT_NAME}-lambda-role \
+    --handler lambda_function.lambda_handler \
+    --zip-file fileb://lambda.zip \
+    --timeout 60 \
+    --region ${AWS_REGION}
+  echo -e "${GREEN}Lambda creada${NC}"
+fi
 
 # ============================================================
 # PASO 9: CONFIGURAR S3 TRIGGER
@@ -304,7 +337,7 @@ aws lambda add-permission \
   --action lambda:InvokeFunction \
   --principal s3.amazonaws.com \
   --source-arn arn:aws:s3:::${BUCKET_NAME} \
-  --region ${AWS_REGION}
+  --region ${AWS_REGION} 2>/dev/null || echo "Permiso S3 ya existe"
 
 cat > s3-notification.json << EOF
 {

@@ -1,78 +1,88 @@
-# 🚀 Serverless Image Processing Pipeline (AWS Batch & Event-Driven AI)
+# 🚀 Serverless Batch Processing Pipeline (S3 → Lambda → AWS Batch)
 
-This project implements a **Cloud-Native architecture** designed for automated, large-scale image processing. It leverages an **Event-Driven** approach to optimize operational costs, ensuring that high-performance computing resources are provisioned only when data is available for processing.
+This project implements a **reusable, cloud-native pipeline** for automated batch processing using an event-driven architecture. It is designed so that **the only thing you need to change is the Docker image and the processing script** — the infrastructure, orchestration, and deployment are fully generic.
 
----
-
-## 🎯 Project Objective
-
-The system automates the workflow from the moment an image is captured until it is processed by an AI model or a computer vision script.
-
-* **Trigger:** An image upload to an **Amazon S3** bucket.
-* **Orchestration:** An **AWS Lambda** function detects the event and submits a job to **AWS Batch**.
-* **Processing:** A Docker container running on **AWS Fargate** executes the heavy-duty computational task, providing full isolation and scalability without the need to manage underlying servers.
+The reference implementation processes images (horizontal flip), but the same pipeline can be used for any heavy workload: AI inference, video transcoding, data transformation, document parsing, etc.
 
 ---
 
-## 🏗️ Technical Architecture
+## 🎯 How it works
 
+1. A file is uploaded to `s3://[bucket]/input/`
+2. S3 fires an `ObjectCreated` event that triggers a Lambda function
+3. Lambda submits a job to AWS Batch, passing the bucket name and file key as environment variables
+4. AWS Batch spins up a Fargate container that runs your processing code
+5. The container reads the input from S3, processes it, and writes the result to `s3://[bucket]/output/`
+6. Once finished, Fargate automatically de-provisions — you pay only for what you use
 
+---
 
-The deployment is fully automated via a Bash orchestration script that configures the following infrastructure:
+## 🏗️ Infrastructure
 
-| Component | Function |
+| Component | Role |
 | :--- | :--- |
-| **Amazon S3** | Distributed storage for input (`input/`) and output (`output/`) images. |
-| **AWS Lambda** | Serverless microservice acting as an event bridge between S3 and AWS Batch. |
-| **AWS Batch (Fargate)** | Computational job manager that provisions containers on-demand. |
-| **Amazon ECR** | Private Docker registry hosting the core processing logic. |
-| **IAM & Security** | Fine-grained "Least Privilege" policy configuration to ensure infrastructure security. |
+| **Amazon S3** | Input (`input/`) and output (`output/`) storage |
+| **AWS Lambda** | Event bridge between S3 and Batch |
+| **AWS Batch (Fargate)** | On-demand container execution, no servers to manage |
+| **Amazon ECR** | Private Docker registry for your processing image |
+| **IAM** | Least-privilege roles for Lambda, Batch, and ECS |
 
 ---
 
-## 🛠️ Execution Flow
+## 🔁 Adapting this pipeline to your use case
 
-1.  **Ingestion:** A file is uploaded to `s3://[bucket-name]/input/`.
-2.  **Notification:** S3 triggers an `ObjectCreated` event, invoking the Lambda function.
-3.  **Scheduling:** Lambda submits the job to the **AWS Batch** queue, passing the file metadata as environment variables.
-4.  **Computation:** AWS Batch instantiates a container based on the **ECR** image, processes the image, and writes the results to the output directory.
-5.  **Efficiency:** Upon task completion, computational resources are automatically de-provisioned.
+The pipeline is fully generic. To use it for a different workload:
+
+**1. Replace `processor.py`** with your own logic. The only contract is:
+```python
+import os
+BUCKET = os.environ["BUCKET"]      # bucket name, injected by Lambda
+INPUT_KEY = os.environ["INPUT_KEY"] # path of the uploaded file, e.g. input/file.jpg
+```
+Read from `s3://BUCKET/INPUT_KEY`, process, write to `s3://BUCKET/output/`.
+
+**2. Update the `Dockerfile`** to install your dependencies:
+```dockerfile
+FROM python:3.12-slim
+RUN pip install --no-cache-dir your-library boto3
+COPY processor.py .
+CMD ["python", "processor.py"]
+```
+
+That's it. Run `./deploy.sh` and the pipeline is live.
 
 ---
 
-## 🚀 Deployment Guide
+## 🚀 Deployment
 
 ### Prerequisites
-* AWS CLI configured with appropriate administrative credentials.
-* Docker installed locally for image building.
-* A `Dockerfile` containing the processing logic in the root directory.
+- AWS CLI configured with admin credentials
+- Docker installed locally
 
-### Installation Steps
-1.  Clone this repository.
-2.  Grant execution permissions to the script:
-    ```bash
-    chmod +x deploy.sh
-    ```
-3.  Execute the automated deployment:
-    ```bash
-    ./deploy.sh
-    ```
+### Steps
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
 
-The script will provide a summary of the created resources and save the environment variables to a local `.deployment-config` file for management.
+The script creates all resources from scratch and is **idempotent** — safe to run multiple times. Resources that already exist are reused, not recreated.
 
----
+### Test it
+```bash
+aws s3 cp test.jpg s3://[bucket-name]/input/test.jpg
+```
 
-## 🧠 Strategic Value for AI Workloads
-
-* **Horizontal Scalability:** Capable of processing thousands of images concurrently without performance bottlenecks.
-* **Portability:** Docker encapsulation ensures that the execution environment (including dependencies like OpenCV, PyTorch, or TensorFlow) remains identical from development to production.
-* **Cost Optimization:** By utilizing Fargate, there are zero idle-time costs; billing is strictly based on the exact duration of the processing task.
+### Monitor
+- **Lambda logs:** CloudWatch → Log groups → `/aws/lambda/[lambda-name]`
+- **Batch job status:** AWS Console → Batch → Jobs
+- **Container logs:** CloudWatch → Log groups → `/aws/batch/job`
+- **Result:** `aws s3 ls s3://[bucket-name]/output/`
 
 ---
 
-## 🧹 Resource Cleanup
+## 🧹 Cleanup
 
-To decommission the infrastructure and avoid unnecessary AWS charges:
 ```bash
 chmod +x clean.sh
 ./clean.sh
+```

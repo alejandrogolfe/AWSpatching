@@ -1,12 +1,9 @@
-# Imagen base oficial de AWS Lambda para Python
-FROM public.ecr.aws/lambda/python:3.12
+FROM python:3.12-slim
 
-# Copiar requirements e instalar dependencias
-COPY requirements.txt ${LAMBDA_TASK_ROOT}
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
 
-# Copiar código
-COPY lambda_function.py ${LAMBDA_TASK_ROOT}
+RUN pip install --no-cache-dir pillow boto3
 
-# Handler
-CMD ["lambda_function.lambda_handler"]
+COPY processor.py .
+
+CMD ["python", "processor.py"]
